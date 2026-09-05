@@ -6,8 +6,6 @@
 # Required secrets:
 #   ANDROID_KEYSTORE_BASE64 - base64 of the release keystore (.jks)
 #   KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD
-# Optional secrets:
-#   GITHUB_OAUTH_CLIENT_ID  - enables device-flow sign-in in the shipped build
 name: codex-android-release
 
 on:
@@ -87,13 +85,11 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
           VERSION_NAME: ${{ steps.version.outputs.version }}
           VERSION_CODE: ${{ steps.version.outputs.version_code }}
-          OAUTH_CLIENT_ID: ${{ secrets.GITHUB_OAUTH_CLIENT_ID }}
         run: |
           set -euo pipefail
           ./gradlew assembleRelease \
             -PversionName="$VERSION_NAME" \
             -PversionCode="$VERSION_CODE" \
-            -Pcodexmobile.githubClientId="${OAUTH_CLIENT_ID:-}" \
             --stacktrace
 
       - name: Stage APK
@@ -128,7 +124,7 @@ jobs:
           gh release create "$TAG" "$APK" \
             --repo "$GITHUB_REPOSITORY" \
             --title "Codex Mobile $VERSION" \
-            --notes "Android client for the Codex cloud agent. Install the APK on a device running Android 8.0 (API 26) or newer."
+            --notes "Codex Mobile: a Codex Cloud client for Android. Sign in with your ChatGPT account. Requires Android 8.0 (API 26) or newer."
 
       - name: Remove keystore
         if: always()

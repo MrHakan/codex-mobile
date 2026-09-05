@@ -1,11 +1,10 @@
 package com.mrhakan.codexmobile
 
 import android.content.Context
-import com.mrhakan.codexmobile.auth.AuthRepository
+import com.mrhakan.codexmobile.auth.ChatGptAuthRepository
 import com.mrhakan.codexmobile.auth.SecureTokenStore
-import com.mrhakan.codexmobile.data.CodexTaskRepository
-import com.mrhakan.codexmobile.data.GitHubClients
-import com.mrhakan.codexmobile.data.TaskStore
+import com.mrhakan.codexmobile.data.CodexCloudClient
+import com.mrhakan.codexmobile.data.CodexCloudRepository
 
 /**
  * Hand-rolled dependency wiring. The app has one graph and one screen stack, so
@@ -18,10 +17,13 @@ object ServiceLocator {
 
     class Graph(context: Context) {
         val secureStore = SecureTokenStore(context)
-        val authRepository = AuthRepository(secureStore)
-        val taskStore = TaskStore(secureStore)
-        val api = GitHubClients.createApi { secureStore.token }
-        val taskRepository = CodexTaskRepository(api, taskStore)
+        val authRepository = ChatGptAuthRepository(
+            api = CodexCloudClient.createAuthApi(),
+            store = secureStore,
+        )
+        val cloudRepository = CodexCloudRepository(
+            CodexCloudClient.createCloudApi(authRepository),
+        )
     }
 
     fun graph(context: Context): Graph =

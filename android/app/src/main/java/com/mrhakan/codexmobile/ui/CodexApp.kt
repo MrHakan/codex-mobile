@@ -4,18 +4,6 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.List
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.Icon
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -23,29 +11,23 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Modifier
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.mrhakan.codexmobile.ui.screens.RepoPickerScreen
-import com.mrhakan.codexmobile.ui.screens.RunDetailScreen
-import com.mrhakan.codexmobile.ui.screens.RunListScreen
-import com.mrhakan.codexmobile.ui.screens.SettingsScreen
+import com.mrhakan.codexmobile.ui.screens.ComposerScreen
 import com.mrhakan.codexmobile.ui.screens.SignInScreen
-import com.mrhakan.codexmobile.ui.screens.TaskComposerScreen
+import com.mrhakan.codexmobile.ui.screens.TaskListScreen
+import com.mrhakan.codexmobile.ui.screens.ThreadScreen
 
-/** Screen stack. Small enough that a nav library would be overkill. */
-private enum class Tab { RUNS, COMPOSE, SETTINGS }
+/** Screen stack: list -> composer or thread. Small enough to hold by hand. */
+private enum class Screen { LIST, COMPOSER, THREAD }
 
 @Composable
 fun CodexApp(viewModel: AppViewModel) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
-    val tasks by viewModel.tasks.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
-
-    var tab by rememberSaveable { mutableStateOf(Tab.COMPOSE) }
-    var pickingRepo by rememberSaveable { mutableStateOf(false) }
-    var openTaskId by rememberSaveable { mutableStateOf<String?>(null) }
+    var screen by rememberSaveable { mutableStateOf(Screen.LIST) }
 
     val openUrl: (String) -> Unit = { url ->
         runCatching {
@@ -65,104 +47,56 @@ fun CodexApp(viewModel: AppViewModel) {
     if (!state.signedIn) {
         SignInScreen(
             state = state,
-            onSignInWithToken = viewModel::signInWithToken,
-            onStartDeviceFlow = viewModel::startDeviceFlow,
+            onSignIn = viewModel::startSignIn,
             onOpenUrl = openUrl,
             snackbarHostState = snackbarHostState,
         )
         return
     }
 
-    val openedTask = openTaskId?.let { id -> tasks.firstOrNull { it.id == id } }
-
-    BackHandler(enabled = pickingRepo || openedTask != null) {
-        when {
-            pickingRepo -> pickingRepo = false
-            else -> openTaskId = null
-        }
+    BackHandler(enabled = screen != Screen.LIST) {
+        if (screen == Screen.THREAD) viewModel.closeThread()
+        screen = Screen.LIST
     }
 
-    when {
-        pickingRepo -> RepoPickerScreen(
+    when (screen) {
+        Screen.LIST -> TaskListScreen(
             state = state,
-            onFilterChange = viewModel::setRepoFilter,
-            onRefresh = viewModel::loadRepositories,
-            onSelect = { repo ->
-                viewModel.selectRepository(repo)
-                pickingRepo = false
+            onOpenTask = { taskId ->
+                viewModel.openThread(taskId)
+                screen = Screen.THREAD
             },
-            onBack = { pickingRepo = false },
-        )
-
-        openedTask != null -> RunDetailScreen(
-            task = openedTask,
-            onRefresh = { viewModel.refreshTask(openedTask.id) },
+            onNewTask = { screen = Screen.COMPOSER },
+            onRefresh = {
+                viewModel.loadTasks()
+                viewModel.loadEnvironments()
+            },
+            onSignOut = {
+                viewModel.signOut()
+                screen = Screen.LIST
+            },
             onOpenUrl = openUrl,
-            onDelete = {
-                viewModel.deleteTask(openedTask.id)
-                openTaskId = null
-            },
-            onBack = { openTaskId = null },
+            snackbarHostState = snackbarHostState,
         )
 
-        else -> Scaffold(
-            snackbarHost = { SnackbarHost(snackbarHostState) },
-            bottomBar = {
-                NavigationBar {
-                    NavigationBarItem(
-                        selected = tab == Tab.COMPOSE,
-                        onClick = { tab = Tab.COMPOSE },
-                        icon = { Icon(Icons.Default.Add, contentDescription = null) },
-                        label = { Text("New task") },
-                    )
-                    NavigationBarItem(
-                        selected = tab == Tab.RUNS,
-                        onClick = { tab = Tab.RUNS },
-                        icon = { Icon(Icons.AutoMirrored.Filled.List, contentDescription = null) },
-                        label = { Text("Runs") },
-                    )
-                    NavigationBarItem(
-                        selected = tab == Tab.SETTINGS,
-                        onClick = { tab = Tab.SETTINGS },
-                        icon = { Icon(Icons.Default.Settings, contentDescription = null) },
-                        label = { Text("Settings") },
-                    )
-                }
+        Screen.COMPOSER -> ComposerScreen(
+            state = state,
+            onPromptChange = viewModel::setPrompt,
+            onBranchChange = viewModel::setBranch,
+            onSelectEnvironment = viewModel::selectEnvironment,
+            onSubmit = { viewModel.submit { screen = Screen.THREAD } },
+            onBack = { screen = Screen.LIST },
+        )
+
+        Screen.THREAD -> ThreadScreen(
+            thread = state.thread,
+            loading = state.threadLoading,
+            onRefresh = viewModel::refreshThread,
+            onOpenUrl = openUrl,
+            onBack = {
+                viewModel.closeThread()
+                screen = Screen.LIST
             },
-        ) { padding ->
-            val contentModifier = Modifier.padding(padding)
-            when (tab) {
-                Tab.COMPOSE -> TaskComposerScreen(
-                    modifier = contentModifier,
-                    state = state,
-                    onPromptChange = viewModel::setPrompt,
-                    onModelChange = viewModel::setModel,
-                    onPickRepo = { pickingRepo = true },
-                    onSelectBranch = viewModel::selectBranch,
-                    onSubmit = {
-                        viewModel.submitTask { taskId ->
-                            tab = Tab.RUNS
-                            openTaskId = taskId
-                        }
-                    },
-                )
-
-                Tab.RUNS -> RunListScreen(
-                    modifier = contentModifier,
-                    tasks = tasks,
-                    onOpen = { openTaskId = it },
-                    onRefresh = { tasks.forEach { viewModel.refreshTask(it.id) } },
-                )
-
-                Tab.SETTINGS -> SettingsScreen(
-                    modifier = contentModifier,
-                    state = state,
-                    onControllerRepoChange = viewModel::setControllerRepo,
-                    onWorkflowRefChange = viewModel::setWorkflowRef,
-                    onSignOut = viewModel::signOut,
-                    onOpenUrl = openUrl,
-                )
-            }
-        }
+        )
     }
 }

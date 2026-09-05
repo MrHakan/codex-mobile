@@ -5,10 +5,6 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
 }
 
-// Optional: client id of a GitHub OAuth app, used only for the device flow.
-val githubClientId: String =
-    (project.findProperty("codexmobile.githubClientId") as String?).orEmpty()
-
 // The release workflow passes these from the `android-v*` tag it is building.
 val appVersionName: String = (project.findProperty("versionName") as String?) ?: "0.1.0"
 val appVersionCode: Int = (project.findProperty("versionCode") as String?)?.toInt() ?: 1
@@ -23,7 +19,6 @@ android {
         targetSdk = 35
         versionCode = appVersionCode
         versionName = appVersionName
-        buildConfigField("String", "GITHUB_OAUTH_CLIENT_ID", "\"$githubClientId\"")
     }
 
     signingConfigs {
@@ -67,7 +62,6 @@ android {
 
     buildFeatures {
         compose = true
-        buildConfig = true
     }
 
     packaging {

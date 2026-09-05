@@ -1,18 +1,26 @@
+@file:Suppress("DEPRECATION")
+
 package com.mrhakan.codexmobile.auth
 
 import android.content.Context
 import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
-import com.mrhakan.codexmobile.data.TaskHistoryPersistence
+import kotlinx.serialization.json.Json
 
 /**
- * Keystore-backed storage for the GitHub token and the settings that go with
- * it. The token is only ever read into memory to build an `Authorization`
- * header; it is never written to logs, plain preferences, or backups (see
- * `data_extraction_rules.xml`).
+ * Keystore-backed storage for the ChatGPT OAuth tokens. Tokens are read into
+ * memory only to build request headers; they are never logged and are excluded
+ * from cloud backup and device transfer (see `data_extraction_rules.xml`).
+ *
+ * `EncryptedSharedPreferences` is deprecated in security-crypto 1.1.0 without a
+ * drop-in replacement; it still does what it says (AES-GCM under a Keystore
+ * master key), so the deprecation is suppressed here rather than hand-rolling
+ * the same thing over DataStore.
  */
-class SecureTokenStore(context: Context) : TaskHistoryPersistence {
+class SecureTokenStore(context: Context) : TokenStorage {
+
+    private val json = Json { ignoreUnknownKeys = true }
 
     private val prefs: SharedPreferences by lazy {
         val masterKey = MasterKey.Builder(context.applicationContext)
@@ -27,47 +35,31 @@ class SecureTokenStore(context: Context) : TaskHistoryPersistence {
         )
     }
 
-    var token: String?
-        get() = prefs.getString(KEY_TOKEN, null)?.takeIf { it.isNotBlank() }
+    override var authState: AuthState?
+        get() = prefs.getString(KEY_AUTH, null)
+            ?.let { runCatching { json.decodeFromString<AuthState>(it) }.getOrNull() }
         set(value) {
             prefs.edit().apply {
-                if (value.isNullOrBlank()) remove(KEY_TOKEN) else putString(KEY_TOKEN, value)
+                if (value == null) {
+                    remove(KEY_AUTH)
+                } else {
+                    putString(KEY_AUTH, json.encodeToString(AuthState.serializer(), value))
+                }
             }.apply()
         }
 
-    var login: String?
-        get() = prefs.getString(KEY_LOGIN, null)
-        set(value) = prefs.edit().putString(KEY_LOGIN, value).apply()
+    /** Last environment the user submitted a task to, so the composer can reuse it. */
+    override var lastEnvironmentId: String?
+        get() = prefs.getString(KEY_LAST_ENV, null)
+        set(value) = prefs.edit().putString(KEY_LAST_ENV, value).apply()
 
-    /** Repository that hosts `codex-cloud-agent.yml`. */
-    var controllerRepo: String
-        get() = prefs.getString(KEY_CONTROLLER_REPO, DEFAULT_CONTROLLER_REPO)
-            ?: DEFAULT_CONTROLLER_REPO
-        set(value) = prefs.edit().putString(KEY_CONTROLLER_REPO, value).apply()
-
-    /** Branch of the controller repo the workflow file is read from. */
-    var workflowRef: String
-        get() = prefs.getString(KEY_WORKFLOW_REF, DEFAULT_WORKFLOW_REF) ?: DEFAULT_WORKFLOW_REF
-        set(value) = prefs.edit().putString(KEY_WORKFLOW_REF, value).apply()
-
-    /** Raw JSON for the local task history; see [com.mrhakan.codexmobile.data.TaskStore]. */
-    override var taskHistoryJson: String?
-        get() = prefs.getString(KEY_TASK_HISTORY, null)
-        set(value) = prefs.edit().putString(KEY_TASK_HISTORY, value).apply()
-
-    fun clear() {
+    override fun clear() {
         prefs.edit().clear().apply()
     }
 
-    companion object {
-        private const val PREFS_NAME = "codex_mobile_secure"
-        private const val KEY_TOKEN = "github_token"
-        private const val KEY_LOGIN = "github_login"
-        private const val KEY_CONTROLLER_REPO = "controller_repo"
-        private const val KEY_WORKFLOW_REF = "workflow_ref"
-        private const val KEY_TASK_HISTORY = "task_history"
-
-        const val DEFAULT_CONTROLLER_REPO = "MrHakan/codex-mobile"
-        const val DEFAULT_WORKFLOW_REF = "main"
+    private companion object {
+        const val PREFS_NAME = "codex_mobile_secure"
+        const val KEY_AUTH = "chatgpt_auth"
+        const val KEY_LAST_ENV = "last_environment_id"
     }
 }

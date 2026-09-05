@@ -1,16 +1,15 @@
 # Codex Mobile
 
-An Android client for the [Codex cloud agent](../docs/codex-cloud-agent.md). It
-sends a prompt to `codex-cloud-agent.yml` on GitHub Actions, follows the run,
-and links to the pull request Codex opens. Codex never runs on the phone — the
-app is pure Kotlin and talks only to `api.github.com` over HTTPS. No NDK, no
-bundled binaries.
+An Android client for [Codex Cloud](../docs/codex-cloud-client.md) — the same
+backend `codex cloud` and chatgpt.com/codex use. Sign in with your **ChatGPT
+account**, start a task on a connected repository, and watch it work. Tasks run
+in OpenAI's cloud, not on the phone: no API key, no runner, no server.
 
 ## Requirements
 
 - Android 8.0 (API 26) or newer.
-- A GitHub token that can trigger the workflow and read the repositories you
-  want to work on.
+- A ChatGPT plan that includes Codex, with at least one environment connected at
+  chatgpt.com/codex/settings.
 
 ## Building
 
@@ -23,51 +22,41 @@ The debug APK lands in `app/build/outputs/apk/debug/`. `assembleRelease` builds
 the minified variant; it is signed only when `ANDROID_KEYSTORE_PATH`,
 `KEYSTORE_PASSWORD`, `KEY_ALIAS` and `KEY_PASSWORD` are set in the environment
 (the release workflow does that from repository secrets), and unsigned
-otherwise.
-
-Optional build inputs:
-
-- `-PversionName=0.2.0 -PversionCode=200` — set by the release workflow from the
-  `android-v*` tag.
-- `-Pcodexmobile.githubClientId=<id>` (or the same key in `gradle.properties`) —
-  the client id of a GitHub OAuth app. Without it the app hides device-flow
-  sign-in and only accepts a pasted token.
+otherwise. `-PversionName=0.2.0 -PversionCode=200` set the version; the release
+workflow derives both from the `android-v*` tag.
 
 ## Signing in
 
-Two options on the sign-in screen:
+Tap **Sign in with ChatGPT**. The app shows a short code, you approve it at
+`auth.openai.com/codex/device` in a browser, and the app receives the tokens —
+the same device flow as `codex login --device-auth`.
 
-- **Device flow** — shown only when the build carries an OAuth client id. The
-  app displays a user code, you approve it on github.com, and it exchanges the
-  code for a token with the `repo` and `workflow` scopes.
-- **Personal access token** — a fine-grained token needs _Actions: read and
-  write_ (to dispatch the workflow), _Contents: read_ and _Pull requests: read_
-  on the repositories involved. A classic token needs `repo` and `workflow`.
-
-Either way the token is stored with `EncryptedSharedPreferences` (Keystore-backed)
-and is excluded from cloud backup and device transfer. It leaves the device only
-as an `Authorization` header to `api.github.com`.
+Tokens live in `EncryptedSharedPreferences` (Keystore-backed) and are excluded
+from cloud backup and device transfer. They leave the device only as request
+headers to `auth.openai.com` and `chatgpt.com`.
 
 ## Using it
 
-1. **New task** — pick a repository, pick a base branch, describe the task.
-2. **Run on GitHub Actions** — the app dispatches the workflow in the controller
-   repository (Settings tab; `MrHakan/codex-mobile` by default) and starts
-   polling.
-3. **Runs** — every task with its live status. Open one to see the workflow
-   steps, the prompt, a link to the run, and the pull request once it exists.
+1. **New task** — pick an environment, optionally a branch, describe the work.
+2. **Runs** — the task list shows status, `+added −removed` and a PR marker.
+3. **Thread** — your prompt, Codex's replies, the unified diff, and buttons for
+   the pull request and the web view.
 
-Polling runs while the app is in the foreground and backs off from 4s to 20s.
-Closing the app stops it; reopening resumes polling for anything unfinished.
+Polling runs while the app is in the foreground (4s backing off to 20s). Closing
+the app does not stop the task; it keeps running in the cloud.
+
+Follow-up messages and "Create PR" are not in the app — the Codex CLI has no
+endpoint for them either, so the thread links out to chatgpt.com instead of
+guessing at one.
 
 ## Layout
 
-| Path                | What lives there                                                             |
-| ------------------- | ---------------------------------------------------------------------------- |
-| `auth/`             | `SecureTokenStore` (Keystore-backed), device flow, sign-in.                   |
-| `data/`             | GitHub REST models, the Retrofit interface, and `CodexTaskRepository`.        |
-| `ui/`               | `AppViewModel` plus the Compose screens.                                      |
-| `app/src/test/`     | JVM tests for dispatch, run matching, and pull-request lookup (MockWebServer).|
+| Path            | What lives there                                                       |
+| --------------- | ---------------------------------------------------------------------- |
+| `auth/`         | ChatGPT device flow, token refresh, Keystore-backed storage.            |
+| `data/`         | Codex Cloud wire models, Retrofit API, and `TaskMapper`.                |
+| `ui/`           | `AppViewModel` plus the Compose screens and the diff view.              |
+| `app/src/test/` | JVM tests for the device flow, refresh, payload shapes and the mapper.  |
 
 ## Dependency versions
 
