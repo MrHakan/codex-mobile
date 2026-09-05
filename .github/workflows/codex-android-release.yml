@@ -30,22 +30,33 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.tag || github.ref }}
-          persist-credentials: false
-
-      - name: Resolve version from tag
+      # Runs before the checkout so a bad or missing tag fails with an
+      # actionable message instead of an opaque `git fetch` error.
+      - name: Resolve and verify the release tag
         id: version
         env:
           RAW_TAG: ${{ inputs.tag || github.ref_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          API_URL: ${{ github.api_url }}
         run: |
           set -euo pipefail
+
           if ! printf '%s' "$RAW_TAG" | grep -Eq '^android-v[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "::error::Tag must look like android-vMAJOR.MINOR.PATCH (got: $RAW_TAG)"
+            echo "::error::Expected an existing tag named android-vMAJOR.MINOR.PATCH (for example android-v0.1.0), but got '${RAW_TAG}'. Create the tag first: git tag android-v0.1.0 && git push origin android-v0.1.0"
             exit 1
           fi
+
+          status="$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${API_URL}/repos/${REPOSITORY}/git/ref/tags/${RAW_TAG}")"
+          if [ "$status" != "200" ]; then
+            echo "::error::Tag ${RAW_TAG} does not exist in ${REPOSITORY} (the tag lookup returned HTTP ${status}). Create and push it first: git tag ${RAW_TAG} && git push origin ${RAW_TAG}"
+            exit 1
+          fi
+
           version="${RAW_TAG#android-v}"
           IFS=. read -r major minor patch <<< "$version"
           # versionCode must increase monotonically across releases.
@@ -55,6 +66,12 @@ jobs:
             echo "version=$version"
             echo "version_code=$version_code"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout the tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.version.outputs.tag }}
+          persist-credentials: false
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4

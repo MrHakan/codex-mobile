@@ -25,6 +25,38 @@ the minified variant; it is signed only when `ANDROID_KEYSTORE_PATH`,
 otherwise. `-PversionName=0.2.0 -PversionCode=200` set the version; the release
 workflow derives both from the `android-v*` tag.
 
+## Releasing
+
+The release workflow is driven by tags and needs the signing secrets set on the
+repository first:
+
+1. Create a keystore once and keep it somewhere safe:
+
+   ```bash
+   keytool -genkeypair -v -keystore release.jks -alias codexmobile \
+     -keyalg RSA -keysize 2048 -validity 10000
+   ```
+
+2. Add four repository secrets (Settings -> Secrets and variables -> Actions):
+   `ANDROID_KEYSTORE_BASE64` (`base64 -w0 release.jks`), `KEYSTORE_PASSWORD`,
+   `KEY_ALIAS`, `KEY_PASSWORD`.
+
+3. Tag and push. The tag must exist before the workflow runs, and its name is
+   where the version comes from:
+
+   ```bash
+   git tag android-v0.1.0
+   git push origin android-v0.1.0
+   ```
+
+Pushing the tag starts the build; running the workflow by hand takes the same
+`android-v*` tag name as its input. Anything else fails immediately with a
+message saying so.
+
+Until you cut a release, the debug APK from the latest `android-ci` run on
+`main` is installable: open the run on GitHub and download the
+`codex-mobile-debug-apk` artifact.
+
 ## Signing in
 
 Tap **Sign in with ChatGPT**. The app shows a short code, you approve it at
@@ -53,10 +85,10 @@ guessing at one.
 
 | Path            | What lives there                                                       |
 | --------------- | ---------------------------------------------------------------------- |
-| `auth/`         | ChatGPT device flow, token refresh, Keystore-backed storage.            |
-| `data/`         | Codex Cloud wire models, Retrofit API, and `TaskMapper`.                |
-| `ui/`           | `AppViewModel` plus the Compose screens and the diff view.              |
-| `app/src/test/` | JVM tests for the device flow, refresh, payload shapes and the mapper.  |
+| `auth/`         | ChatGPT device flow, token refresh, Keystore-backed storage.           |
+| `data/`         | Codex Cloud wire models, Retrofit API, and `TaskMapper`.               |
+| `ui/`           | `AppViewModel` plus the Compose screens and the diff view.             |
+| `app/src/test/` | JVM tests for the device flow, refresh, payload shapes and the mapper. |
 
 ## Dependency versions
 
