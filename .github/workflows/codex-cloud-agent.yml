@@ -1,0 +1,315 @@
+# Codex cloud agent.
+#
+# Runs Codex CLI non-interactively on a GitHub-hosted runner against a repo,
+# then opens a pull request with whatever it changed. This is the "cloud runner"
+# half of the Codex mobile client: the Android app never runs Codex locally, it
+# only triggers this workflow through the GitHub REST API and polls the run.
+#
+# Triggers:
+#   * workflow_dispatch    - used by the Android app and for manual testing.
+#   * repository_dispatch  - `codex-task` event, for API-only clients.
+#
+# Required secrets:
+#   OPENAI_API_KEY  - model auth for the Codex CLI.
+#   CODEX_GH_TOKEN  - optional. Needed only when `target_repo` points at another
+#                     repository, or when you want PR creation to run as a
+#                     GitHub App / PAT instead of the default GITHUB_TOKEN.
+name: Codex cloud agent
+
+run-name: "Codex task ${{ inputs.task_id || github.event.client_payload.task_id || github.run_id }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: Task for Codex to perform.
+        required: true
+        type: string
+      base_branch:
+        description: Branch to start from. Defaults to the repository default branch.
+        required: false
+        type: string
+      task_id:
+        description: Client-supplied id used for the branch name and run correlation.
+        required: false
+        type: string
+      target_repo:
+        description: "owner/repo to operate on. Defaults to this repository."
+        required: false
+        type: string
+      model:
+        description: Model slug passed to `codex exec --model`. Optional.
+        required: false
+        type: string
+      codex_version:
+        description: npm version of @openai/codex to install.
+        required: false
+        default: latest
+        type: string
+  repository_dispatch:
+    types: [codex-task]
+
+permissions:
+  contents: read
+
+jobs:
+  codex:
+    name: Run Codex
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      task_id: ${{ steps.task.outputs.task_id }}
+      branch: ${{ steps.task.outputs.branch }}
+      changed: ${{ steps.result.outputs.changed }}
+      pr_url: ${{ steps.result.outputs.pr_url }}
+    steps:
+      - name: Resolve task inputs
+        id: task
+        env:
+          # Never interpolate untrusted input directly into a shell script.
+          RAW_PROMPT: ${{ inputs.prompt || github.event.client_payload.prompt }}
+          RAW_BASE_BRANCH: ${{ inputs.base_branch || github.event.client_payload.base_branch }}
+          RAW_TASK_ID: ${{ inputs.task_id || github.event.client_payload.task_id }}
+          RAW_TARGET_REPO: ${{ inputs.target_repo || github.event.client_payload.target_repo }}
+          RAW_MODEL: ${{ inputs.model || github.event.client_payload.model }}
+          RAW_CODEX_VERSION: ${{ inputs.codex_version || github.event.client_payload.codex_version }}
+          DEFAULT_REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${RAW_PROMPT//[[:space:]]/}" ]; then
+            echo '::error::No prompt supplied. Pass the prompt input (workflow_dispatch) or client_payload.prompt (repository_dispatch).'
+            exit 1
+          fi
+
+          task_id="${RAW_TASK_ID:-}"
+          if [ -z "$task_id" ]; then
+            task_id="run-${RUN_ID}"
+          fi
+          # The task id ends up in a git ref, so keep it to a boring charset.
+          if ! printf '%s' "$task_id" | grep -Eq '^[A-Za-z0-9._-]{1,64}$'; then
+            echo "::error::task_id must match ^[A-Za-z0-9._-]{1,64}$ (got: $task_id)"
+            exit 1
+          fi
+
+          target_repo="${RAW_TARGET_REPO:-$DEFAULT_REPO}"
+          if ! printf '%s' "$target_repo" | grep -Eq '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'; then
+            echo "::error::target_repo must look like owner/repo (got: $target_repo)"
+            exit 1
+          fi
+
+          base_branch="${RAW_BASE_BRANCH:-}"
+          if [ -z "$base_branch" ] && [ "$target_repo" = "$DEFAULT_REPO" ]; then
+            base_branch="${DEFAULT_BRANCH:-main}"
+          fi
+
+          # The prompt is handed to Codex on stdin so it never passes through
+          # shell quoting or the process argument list.
+          printf '%s' "$RAW_PROMPT" > "$RUNNER_TEMP/codex-prompt.txt"
+
+          {
+            echo "task_id=$task_id"
+            echo "branch=codex/$task_id"
+            echo "target_repo=$target_repo"
+            echo "base_branch=$base_branch"
+            echo "model=${RAW_MODEL:-}"
+            echo "codex_version=${RAW_CODEX_VERSION:-latest}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.task.outputs.target_repo }}
+          ref: ${{ steps.task.outputs.base_branch }}
+          token: ${{ secrets.CODEX_GH_TOKEN || secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Codex CLI
+        env:
+          CODEX_VERSION: ${{ steps.task.outputs.codex_version }}
+        run: |
+          set -euo pipefail
+          npm install -g "@openai/codex@${CODEX_VERSION}"
+          codex --version
+
+      - name: Authenticate Codex
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${OPENAI_API_KEY:-}" ]; then
+            echo "::error::OPENAI_API_KEY secret is not set on this repository."
+            exit 1
+          fi
+          printenv OPENAI_API_KEY | codex login --with-api-key
+
+      - name: Run Codex
+        id: run
+        env:
+          MODEL: ${{ steps.task.outputs.model }}
+        run: |
+          set -euo pipefail
+          set -o pipefail
+
+          # The runner VM is ephemeral and already isolated, so Codex runs with
+          # approvals and its own sandbox disabled; `codex exec` never prompts.
+          args=(
+            exec
+            --json
+            --skip-git-repo-check
+            --dangerously-bypass-approvals-and-sandbox
+            --output-last-message "$RUNNER_TEMP/codex-last-message.md"
+          )
+          if [ -n "${MODEL:-}" ]; then
+            args+=(--model "$MODEL")
+          fi
+
+          # `-` makes Codex read the prompt from stdin.
+          codex "${args[@]}" - \
+            < "$RUNNER_TEMP/codex-prompt.txt" \
+            | tee "$RUNNER_TEMP/codex-events.jsonl"
+
+      - name: Commit, push and open a pull request
+        id: result
+        env:
+          GH_TOKEN: ${{ secrets.CODEX_GH_TOKEN || secrets.GITHUB_TOKEN }}
+          TARGET_REPO: ${{ steps.task.outputs.target_repo }}
+          BASE_BRANCH: ${{ steps.task.outputs.base_branch }}
+          BRANCH: ${{ steps.task.outputs.branch }}
+          TASK_ID: ${{ steps.task.outputs.task_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "codex-cloud-agent[bot]"
+          git config user.email "codex-cloud-agent[bot]@users.noreply.github.com"
+
+          git add -A
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "pr_url=" >> "$GITHUB_OUTPUT"
+            echo "Codex made no file changes."
+            exit 0
+          fi
+
+          git diff --cached --stat > "$RUNNER_TEMP/codex-diffstat.txt"
+
+          git switch -c "$BRANCH"
+          git commit -m "Codex: task ${TASK_ID}" \
+            -m "Prompt:" -m "$(cat "$RUNNER_TEMP/codex-prompt.txt")" \
+            -m "Workflow run: ${RUN_URL}"
+          git push --set-upstream origin "$BRANCH"
+
+          {
+            echo "Automated change produced by the Codex cloud agent."
+            echo
+            echo "codex-task-id: ${TASK_ID}"
+            echo
+            echo "Workflow run: ${RUN_URL}"
+            echo
+            echo "## Prompt"
+            echo
+            echo '```text'
+            cat "$RUNNER_TEMP/codex-prompt.txt"
+            echo
+            echo '```'
+            echo
+            echo "## Diff stat"
+            echo
+            echo '```text'
+            cat "$RUNNER_TEMP/codex-diffstat.txt"
+            echo '```'
+            if [ -s "$RUNNER_TEMP/codex-last-message.md" ]; then
+              echo
+              echo "## Agent summary"
+              echo
+              cat "$RUNNER_TEMP/codex-last-message.md"
+            fi
+            echo
+            echo "<!-- codex-task-id: ${TASK_ID} -->"
+          } > "$RUNNER_TEMP/codex-pr-body.md"
+
+          pr_args=(pr create
+            --repo "$TARGET_REPO"
+            --head "$BRANCH"
+            --title "Codex: task ${TASK_ID}"
+            --body-file "$RUNNER_TEMP/codex-pr-body.md")
+          if [ -n "${BASE_BRANCH:-}" ]; then
+            pr_args+=(--base "$BASE_BRANCH")
+          fi
+
+          pr_url="$(gh "${pr_args[@]}")"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "pr_url=$pr_url" >> "$GITHUB_OUTPUT"
+
+      - name: Write job summary
+        if: always()
+        env:
+          TASK_ID: ${{ steps.task.outputs.task_id }}
+          TARGET_REPO: ${{ steps.task.outputs.target_repo }}
+          BASE_BRANCH: ${{ steps.task.outputs.base_branch }}
+          BRANCH: ${{ steps.task.outputs.branch }}
+          CHANGED: ${{ steps.result.outputs.changed }}
+          PR_URL: ${{ steps.result.outputs.pr_url }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Codex cloud agent"
+            echo
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Task id | \`${TASK_ID}\` |"
+            echo "| Repository | \`${TARGET_REPO}\` |"
+            echo "| Base branch | \`${BASE_BRANCH:-default}\` |"
+            case "${CHANGED:-}" in
+              true) result="pull request opened" ;;
+              false) result="completed with no file changes" ;;
+              *) result="failed before the commit step" ;;
+            esac
+            echo "| Result | ${result} |"
+            echo "| Pull request | ${PR_URL:-none} |"
+            echo
+            echo "### Prompt"
+            echo
+            echo '```text'
+            cat "$RUNNER_TEMP/codex-prompt.txt" 2>/dev/null || echo "(unavailable)"
+            echo
+            echo '```'
+            if [ -s "$RUNNER_TEMP/codex-diffstat.txt" ]; then
+              echo
+              echo "### Diff stat"
+              echo
+              echo '```text'
+              cat "$RUNNER_TEMP/codex-diffstat.txt"
+              echo '```'
+            fi
+            if [ -s "$RUNNER_TEMP/codex-last-message.md" ]; then
+              echo
+              echo "### Agent summary"
+              echo
+              cat "$RUNNER_TEMP/codex-last-message.md"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Codex logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-task-${{ steps.task.outputs.task_id }}
+          if-no-files-found: ignore
+          path: |
+            ${{ runner.temp }}/codex-events.jsonl
+            ${{ runner.temp }}/codex-last-message.md
+            ${{ runner.temp }}/codex-prompt.txt
+            ${{ runner.temp }}/codex-diffstat.txt
